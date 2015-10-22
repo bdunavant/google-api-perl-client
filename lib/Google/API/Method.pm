@@ -8,6 +8,8 @@ use HTTP::Request;
 use URI;
 use URI::Escape qw/uri_escape/;
 
+use Data::Dumper;
+
 sub new {
     my $class = shift;
     my (%param) = @_;
@@ -28,6 +30,14 @@ sub execute {
             $required_param{$p} = delete $self->{opt}{body}{$p};
         }
     }
+    # In the case of media upload for storage objects, a different path is provided
+    if( $http_method eq 'POST' && $self->{doc}{id} eq "storage.objects.insert" ) {
+        # This path is absolute, to strip out everything from the base other than the hostname
+        $self->{base_url} =~ /^(https?:\/\/[^\/]+)/;
+        my $root_url = $1;
+        die "Unable to determine server name in execute()" if !$root_url;
+        $url = $root_url . $self->{doc}{mediaUpload}{protocols}{simple}{path};
+    }
     $url =~ s/{([^}]+)}/uri_escape(delete $required_param{$1})/eg;
     my $uri = URI->new($url);
     my $request;
@@ -35,14 +45,34 @@ sub execute {
         $http_method eq 'PUT' ||
         $http_method eq 'PATCH' ||
         $http_method eq 'DELETE') {
-        $uri->query_form(\%required_param);
-        $request = HTTP::Request->new($http_method => $uri);
         # Some API's (ie: admin/directoryv1/groups/delete) require requests 
         # with an empty body section to be explicitly zero length.
-        if (%{$self->{opt}{body}}) {
+        if (my $media = $self->{opt}{media_body}) {
+            my ($path, $upload_type);
+            unless ($self->{opt}{body}) {
+                $upload_type = 'media';
+                #$path = $self->{doc}{mediaUpload}{protocols}{simple}{path};
+            } else {
+                # TODO implement multipart/related 
+            }
+            #$path =~ s/{([^}]+)}/uri_escape(delete $required_param{$1})/eg;
+            $uri->query_form({
+                %required_param,
+                uploadType => $upload_type,
+                name => $media->basename,
+            });
+            $request = HTTP::Request->new($http_method => $uri);
+            $request->content_type($media->mime_type);
+            $request->content_length($media->length);
+            $request->content($media->bytes);
+        } elsif (%{$self->{opt}{body}}) {
+            $uri->query_form(\%required_param);
+            $request = HTTP::Request->new($http_method => $uri);
             $request->content_type('application/json');
             $request->content($self->{json_parser}->encode($self->{opt}{body}));
         } else {
+            $uri->query_form(\%required_param);
+            $request = HTTP::Request->new($http_method => $uri);
             $request->content_length(0);
         }
     } elsif ($http_method eq 'GET') {
